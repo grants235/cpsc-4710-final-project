@@ -2021,6 +2021,203 @@ def generate_summary_report(
     return report_text
 
 
+# ==============================================================================
+# 6. MODEL CREATION AND TRAINING UTILITIES
+# ==============================================================================
+
+def create_resnet50_model(num_classes: int = 200, pretrained: bool = True) -> nn.Module:
+    """
+    Create ResNet-50 model with custom classifier head.
+
+    Replaces the final FC layer (2048→1000) with a new 2048→num_classes layer
+    for CUB-200-2011 classification.
+
+    Args:
+        num_classes: Number of output classes (default: 200 for CUB)
+        pretrained: Whether to use ImageNet pretrained weights
+
+    Returns:
+        model: ResNet-50 with modified classifier head
+    """
+    from torchvision import models
+
+    if pretrained:
+        weights = models.ResNet50_Weights.IMAGENET1K_V2
+        model = models.resnet50(weights=weights)
+    else:
+        model = models.resnet50(weights=None)
+
+    # Replace final layer: 2048 → num_classes
+    num_ftrs = model.fc.in_features  # Should be 2048 for ResNet-50
+    model.fc = nn.Linear(num_ftrs, num_classes)
+
+    print(f"Created ResNet-50 model:")
+    print(f"  - Feature dimension: {num_ftrs}")
+    print(f"  - Classifier head: {num_ftrs}→{num_classes}")
+    print(f"  - Pretrained on ImageNet: {pretrained}")
+
+    return model
+
+
+def train_one_epoch(
+    model: nn.Module,
+    train_loader: DataLoader,
+    criterion,
+    optimizer,
+    device: str,
+    epoch: int
+) -> Tuple[float, float]:
+    """
+    Train for one epoch.
+
+    Args:
+        model: PyTorch model
+        train_loader: Training data loader
+        criterion: Loss function
+        optimizer: Optimizer
+        device: Device to train on
+        epoch: Current epoch number
+
+    Returns:
+        tuple: (epoch_loss, epoch_accuracy)
+    """
+    model.train()
+    running_loss = 0.0
+    correct = 0
+    total = 0
+
+    pbar = tqdm(train_loader, desc=f"Epoch {epoch} - Training")
+    for images, labels in pbar:
+        images, labels = images.to(device), labels.to(device)
+
+        # Zero gradients
+        optimizer.zero_grad()
+
+        # Forward pass
+        outputs = model(images)
+        loss = criterion(outputs, labels)
+
+        # Backward pass
+        loss.backward()
+        optimizer.step()
+
+        # Statistics
+        running_loss += loss.item() * images.size(0)
+        _, predicted = torch.max(outputs, 1)
+        total += labels.size(0)
+        correct += (predicted == labels).sum().item()
+
+        # Update progress bar
+        pbar.set_postfix({
+            'loss': f'{loss.item():.4f}',
+            'acc': f'{100. * correct / total:.2f}%'
+        })
+
+    epoch_loss = running_loss / total
+    epoch_acc = correct / total
+
+    return epoch_loss, epoch_acc
+
+
+def evaluate_model(
+    model: nn.Module,
+    test_loader: DataLoader,
+    criterion,
+    device: str,
+    epoch: int
+) -> Tuple[float, float]:
+    """
+    Evaluate on validation/test set.
+
+    Args:
+        model: PyTorch model
+        test_loader: Test data loader
+        criterion: Loss function
+        device: Device to evaluate on
+        epoch: Current epoch number
+
+    Returns:
+        tuple: (epoch_loss, epoch_accuracy)
+    """
+    model.eval()
+    running_loss = 0.0
+    correct = 0
+    total = 0
+
+    with torch.no_grad():
+        pbar = tqdm(test_loader, desc=f"Epoch {epoch} - Evaluating")
+        for images, labels in pbar:
+            images, labels = images.to(device), labels.to(device)
+
+            # Forward pass
+            outputs = model(images)
+            loss = criterion(outputs, labels)
+
+            # Statistics
+            running_loss += loss.item() * images.size(0)
+            _, predicted = torch.max(outputs, 1)
+            total += labels.size(0)
+            correct += (predicted == labels).sum().item()
+
+            # Update progress bar
+            pbar.set_postfix({
+                'loss': f'{loss.item():.4f}',
+                'acc': f'{100. * correct / total:.2f}%'
+            })
+
+    epoch_loss = running_loss / total
+    epoch_acc = correct / total
+
+    return epoch_loss, epoch_acc
+
+
+def plot_training_curves(history_df: pd.DataFrame, save_dir: str):
+    """
+    Plot training curves (loss and accuracy) from training history.
+
+    Args:
+        history_df: DataFrame containing training history
+        save_dir: Directory to save plots
+    """
+    import os
+    os.makedirs(save_dir, exist_ok=True)
+
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+
+    # Plot 1: Loss curves
+    axes[0].plot(history_df['train_loss'], label='Train Loss', linewidth=2, marker='o', markersize=4)
+    axes[0].plot(history_df['test_loss'], label='Test Loss', linewidth=2, marker='s', markersize=4)
+    axes[0].set_xlabel('Epoch', fontsize=12, fontweight='bold')
+    axes[0].set_ylabel('Loss', fontsize=12, fontweight='bold')
+    axes[0].set_title('Training and Test Loss', fontsize=14, fontweight='bold')
+    axes[0].legend(fontsize=10)
+    axes[0].grid(True, alpha=0.3)
+
+    # Plot 2: Accuracy curves
+    axes[1].plot(history_df['train_acc'] * 100, label='Train Acc', linewidth=2, marker='o', markersize=4)
+    axes[1].plot(history_df['test_acc'] * 100, label='Test Acc', linewidth=2, marker='s', markersize=4)
+    axes[1].set_xlabel('Epoch', fontsize=12, fontweight='bold')
+    axes[1].set_ylabel('Accuracy (%)', fontsize=12, fontweight='bold')
+    axes[1].set_title('Training and Test Accuracy', fontsize=14, fontweight='bold')
+    axes[1].legend(fontsize=10)
+    axes[1].grid(True, alpha=0.3)
+
+    # Plot 3: Learning rate
+    axes[2].plot(history_df['lr'], linewidth=2, marker='o', markersize=4, color='green')
+    axes[2].set_xlabel('Epoch', fontsize=12, fontweight='bold')
+    axes[2].set_ylabel('Learning Rate', fontsize=12, fontweight='bold')
+    axes[2].set_title('Learning Rate Schedule', fontsize=14, fontweight='bold')
+    axes[2].set_yscale('log')
+    axes[2].grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    save_path = os.path.join(save_dir, 'training_curves.png')
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.close()
+
+    print(f"Training curves saved to {save_path}")
+
+
 if __name__ == "__main__":
     print("Helper Functions Module Loaded")
     print("This module contains all helper functions and classes for explainability testing")
