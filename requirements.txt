@@ -1,0 +1,32 @@
+# Deep Learning Framework
+torch
+torchvision
+pytorch-lightning
+torchmetrics
+
+# Explainability Libraries
+captum
+
+# Conformal Prediction
+torchcp
+
+# Data Processing and Scientific Computing
+# Note: numpy 1.26.4 may need to be updated for Python 3.13 compatibility
+numpy>=1.26.0,<2.0.0
+pandas
+scikit-learn
+
+# Numerical and Statistical
+# Note: scipy 1.12.0 doesn't support Python 3.13, using newer version
+scipy>=1.13.0
+
+# Visualization
+matplotlib
+seaborn
+
+# Progress Bars
+tqdm
+
+# Optional but recommended for Jupyter notebook compatibility
+ipython
+jupyter
