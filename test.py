@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-Test Script for Fine-tuned Model with Explainability
+Test Script for Fine-tuned Model with Explainability and Metrics
 
-This script loads the fine-tuned ResNet-50 model and demonstrates:
-1. Conformal prediction sets
-2. SHAP explainability
-3. GradCAM explainability
-4. Differential explainability
-
-Results are saved to the results/ folder.
+This script:
+1. Computes AUROC and AUPRC metrics
+2. Evaluates different conformal predictors (Split, Class-Conditional, RC3P)
+3. Compares score functions (LAC, APS, Entmax)
+4. Visualizes samples with explainability methods
+5. Saves all results and charts to results/
 """
 
 import argparse
 from pathlib import Path
+from collections import defaultdict
 
 import torch
 import torch.nn as nn
@@ -20,18 +20,38 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, random_split
 from torchvision import transforms
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
+import seaborn as sns
 from scipy.ndimage import gaussian_filter
 from tqdm import tqdm
 
+# Metrics
+from sklearn.metrics import roc_auc_score, average_precision_score
+
 # TorchCP for conformal prediction
 try:
-    from torchcp.classification.score import APS
-    from torchcp.classification.predictor import SplitPredictor
+    from torchcp.classification.score import APS, LAC
+    try:
+        from torchcp.classification.score import EntmaxScore
+        ENTMAX_AVAILABLE = True
+    except ImportError:
+        ENTMAX_AVAILABLE = False
+        print("Warning: EntmaxScore not available in this torchcp version")
+
+    from torchcp.classification.predictor import SplitPredictor, ClassConditionalPredictor
+    try:
+        from torchcp.classification.predictor import RC3PPredictor
+        RC3P_AVAILABLE = True
+    except ImportError:
+        RC3P_AVAILABLE = False
+        print("Warning: RC3PPredictor not available in this torchcp version")
+
     TORCHCP_AVAILABLE = True
 except ImportError:
-    print("Warning: torchcp not available. Install with: pip install torchcp")
+    print("Error: torchcp not available. Install with: pip install torchcp")
     TORCHCP_AVAILABLE = False
+    exit(1)
 
 # Import helpers
 from helpers import (
@@ -51,39 +71,180 @@ def denormalize_image(image_tensor, mean=[0.485, 0.456, 0.406], std=[0.229, 0.22
     return torch.clamp(denorm, 0, 1)
 
 
-def setup_conformal_predictor(model, cal_loader, alpha=0.05, device='cuda'):
-    """Set up and calibrate conformal predictor."""
-    if not TORCHCP_AVAILABLE:
-        print("Warning: Conformal prediction not available without torchcp")
-        return None
-
-    model = model.to(device)
+def compute_classification_metrics(model, test_loader, device='cuda'):
+    """Compute AUROC and AUPRC metrics."""
     model.eval()
-
-    score_fn = APS()
-    predictor = SplitPredictor(score_fn, model)
-
-    print(f"Calibrating conformal predictor (alpha={alpha})...")
-    predictor.calibrate(cal_loader, alpha=alpha)
-
-    return predictor
-
-
-def get_prediction_set(predictor, image, device='cuda'):
-    """Get conformal prediction set for an image."""
-    if predictor is None:
-        # Fallback: return top-3 predictions
-        with torch.no_grad():
-            logits = predictor.model(image.unsqueeze(0).to(device))
-            probs = F.softmax(logits, dim=1)[0]
-            top_k = torch.topk(probs, k=min(3, len(probs)))
-            return top_k.indices.cpu().numpy()
+    all_probs = []
+    all_labels = []
 
     with torch.no_grad():
-        pred_mask = predictor.predict(image.unsqueeze(0).to(device))
-        prediction_set = torch.nonzero(pred_mask[0]).flatten().cpu().numpy()
+        for images, labels in tqdm(test_loader, desc="Computing metrics"):
+            images = images.to(device)
+            logits = model(images)
+            probs = F.softmax(logits, dim=1)
 
-    return prediction_set
+            all_probs.append(probs.cpu().numpy())
+            all_labels.append(labels.cpu().numpy())
+
+    all_probs = np.vstack(all_probs)
+    all_labels = np.concatenate(all_labels)
+
+    # Convert labels to one-hot
+    n_classes = all_probs.shape[1]
+    all_labels_onehot = np.eye(n_classes)[all_labels]
+
+    # Compute metrics
+    auroc = roc_auc_score(all_labels_onehot, all_probs, average='macro', multi_class='ovr')
+    auprc = average_precision_score(all_labels_onehot, all_probs, average='macro')
+
+    return auroc, auprc
+
+
+def evaluate_conformal_predictor(predictor, eval_loader, device='cuda'):
+    """Evaluate conformal predictor and return coverage and average set size."""
+    coverages = []
+    set_sizes = []
+
+    with torch.no_grad():
+        for images, labels in tqdm(eval_loader, desc="Evaluating conformal", leave=False):
+            images = images.to(device)
+            labels = labels.cpu().numpy()
+
+            # Get prediction sets
+            pred_sets = predictor.predict(images)
+            pred_sets = pred_sets.cpu().numpy()
+
+            # Compute coverage and set size
+            for i in range(len(labels)):
+                pred_set_indices = np.where(pred_sets[i] == 1)[0]
+                set_sizes.append(len(pred_set_indices))
+                coverages.append(int(labels[i] in pred_set_indices))
+
+    coverage = np.mean(coverages)
+    avg_set_size = np.mean(set_sizes)
+
+    return coverage, avg_set_size, set_sizes
+
+
+def run_conformal_experiments(model, cal_loader, eval_loader, alpha=0.05, device='cuda'):
+    """Run comprehensive conformal prediction experiments."""
+    results = []
+
+    # Score functions to test
+    score_configs = [
+        ('APS', APS()),
+        ('LAC', LAC()),
+    ]
+
+    if ENTMAX_AVAILABLE:
+        score_configs.append(('Entmax', EntmaxScore()))
+
+    # Predictor classes to test
+    predictor_configs = [
+        ('Split', SplitPredictor),
+        ('Class-Conditional', ClassConditionalPredictor),
+    ]
+
+    if RC3P_AVAILABLE:
+        predictor_configs.append(('RC3P', RC3PPredictor))
+
+    print("\n" + "=" * 70)
+    print("Running Conformal Prediction Experiments")
+    print("=" * 70)
+
+    for predictor_name, predictor_cls in predictor_configs:
+        for score_name, score_fn in score_configs:
+            print(f"\n{predictor_name} + {score_name}:")
+
+            try:
+                # Create and calibrate predictor
+                predictor = predictor_cls(score_fn, model)
+                predictor.calibrate(cal_loader, alpha=alpha)
+
+                # Evaluate
+                coverage, avg_set_size, set_sizes = evaluate_conformal_predictor(
+                    predictor, eval_loader, device
+                )
+
+                print(f"  Coverage: {coverage:.4f}")
+                print(f"  Avg Set Size: {avg_set_size:.2f}")
+
+                results.append({
+                    'predictor': predictor_name,
+                    'score': score_name,
+                    'coverage': coverage,
+                    'avg_set_size': avg_set_size,
+                    'set_sizes': set_sizes
+                })
+
+            except Exception as e:
+                print(f"  Error: {e}")
+                continue
+
+    return results
+
+
+def plot_conformal_results(results, save_dir, alpha=0.05):
+    """Create visualizations for conformal prediction results."""
+    df = pd.DataFrame([{
+        'predictor': r['predictor'],
+        'score': r['score'],
+        'coverage': r['coverage'],
+        'avg_set_size': r['avg_set_size']
+    } for r in results])
+
+    # Create figure with subplots
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+
+    # Plot 1: Coverage by predictor and score
+    pivot_coverage = df.pivot(index='predictor', columns='score', values='coverage')
+    ax1 = axes[0, 0]
+    pivot_coverage.plot(kind='bar', ax=ax1, rot=45, width=0.8)
+    ax1.axhline(y=1-alpha, color='red', linestyle='--', linewidth=2, label=f'Target ({1-alpha:.0%})')
+    ax1.set_ylabel('Coverage', fontsize=12, fontweight='bold')
+    ax1.set_xlabel('Predictor', fontsize=12, fontweight='bold')
+    ax1.set_title('Coverage by Predictor and Score Function', fontsize=13, fontweight='bold')
+    ax1.legend()
+    ax1.grid(axis='y', alpha=0.3)
+
+    # Plot 2: Average set size by predictor and score
+    pivot_size = df.pivot(index='predictor', columns='score', values='avg_set_size')
+    ax2 = axes[0, 1]
+    pivot_size.plot(kind='bar', ax=ax2, rot=45, width=0.8)
+    ax2.set_ylabel('Average Set Size', fontsize=12, fontweight='bold')
+    ax2.set_xlabel('Predictor', fontsize=12, fontweight='bold')
+    ax2.set_title('Average Set Size by Predictor and Score', fontsize=13, fontweight='bold')
+    ax2.legend()
+    ax2.grid(axis='y', alpha=0.3)
+
+    # Plot 3: Heatmap of set sizes
+    ax3 = axes[1, 0]
+    pivot_size_heatmap = df.pivot(index='predictor', columns='score', values='avg_set_size')
+    sns.heatmap(pivot_size_heatmap, annot=True, fmt='.2f', cmap='YlOrRd', ax=ax3,
+                cbar_kws={'label': 'Avg Set Size'})
+    ax3.set_title('Set Size Heatmap', fontsize=13, fontweight='bold')
+    ax3.set_ylabel('Predictor', fontsize=12, fontweight='bold')
+    ax3.set_xlabel('Score Function', fontsize=12, fontweight='bold')
+
+    # Plot 4: Set size distribution for best predictor
+    ax4 = axes[1, 1]
+    best_result = min(results, key=lambda x: x['avg_set_size'])
+    ax4.hist(best_result['set_sizes'], bins=30, edgecolor='black', alpha=0.7, color='steelblue')
+    ax4.axvline(x=best_result['avg_set_size'], color='red', linestyle='--',
+                linewidth=2, label=f"Mean: {best_result['avg_set_size']:.2f}")
+    ax4.set_xlabel('Set Size', fontsize=12, fontweight='bold')
+    ax4.set_ylabel('Frequency', fontsize=12, fontweight='bold')
+    ax4.set_title(f"Set Size Distribution\n{best_result['predictor']} + {best_result['score']}",
+                  fontsize=13, fontweight='bold')
+    ax4.legend()
+    ax4.grid(axis='y', alpha=0.3)
+
+    plt.tight_layout()
+    save_path = Path(save_dir) / 'conformal_analysis.png'
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.close()
+
+    print(f"\nConformal analysis chart saved to {save_path}")
 
 
 def visualize_sample_with_explanations(
@@ -95,16 +256,7 @@ def visualize_sample_with_explanations(
     device='cuda',
     save_path=None
 ):
-    """
-    Visualize a sample with model predictions and explainability methods.
-
-    Shows:
-    - Original image
-    - Model predictions with confidence
-    - SHAP explanations
-    - GradCAM explanations
-    - Differential explanations
-    """
+    """Visualize a sample with model predictions and explainability methods."""
     model.eval()
 
     # Get model predictions
@@ -131,8 +283,8 @@ def visualize_sample_with_explanations(
     axes[0, 0].axis('off')
 
     # Show prediction set info
-    pred_text = f"True Label: {class_names[true_label]}\n\n"
-    pred_text += f"Prediction Set (size={len(prediction_set)}):\n"
+    pred_text = f"True: {class_names[true_label]}\n\n"
+    pred_text += f"Set (n={len(prediction_set)}):\n"
     for i, cls_idx in enumerate(classes_to_explain):
         prob = probs[cls_idx].item()
         pred_text += f"{i+1}. {class_names[cls_idx]}: {prob:.3f}\n"
@@ -144,12 +296,9 @@ def visualize_sample_with_explanations(
     axes[0, 3].axis('off')
 
     # Generate explanations for each class
-    print(f"Generating explanations for {n_classes} classes...")
-
     class_indices_tensor = torch.tensor(classes_to_explain, device=device)
 
     # SHAP explanations
-    print("  Computing SHAP...")
     shap_results = explain_predictions_with_shap(
         model=model,
         input_tensor=image,
@@ -161,7 +310,6 @@ def visualize_sample_with_explanations(
     )
 
     # GradCAM explanations
-    print("  Computing GradCAM...")
     gradcam_results = explain_predictions_with_gradcam(
         model=model,
         input_tensor=image,
@@ -171,7 +319,6 @@ def visualize_sample_with_explanations(
     )
 
     # Differential explanations
-    print("  Computing differential...")
     shap_differential = simple_differential(shap_results, brightness=3.0)
     gradcam_differential = simple_differential(gradcam_results, brightness=3.0)
 
@@ -228,14 +375,13 @@ def visualize_sample_with_explanations(
 
     if save_path:
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        print(f"Saved visualization to {save_path}")
 
     plt.close()
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Test fine-tuned model with explainability visualization'
+        description='Test fine-tuned model with metrics and explainability'
     )
 
     # Model parameters
@@ -248,7 +394,7 @@ def main():
     parser.add_argument('--image-size', type=int, default=448,
                         help='Image size (default: 448)')
     parser.add_argument('--batch-size', type=int, default=32,
-                        help='Batch size for calibration (default: 32)')
+                        help='Batch size (default: 32)')
 
     # Conformal prediction parameters
     parser.add_argument('--alpha', type=float, default=0.05,
@@ -295,10 +441,9 @@ def main():
         transforms.Normalize(mean=MEAN, std=STD)
     ])
 
-    # We only need test data
     _, test_loader = create_dataloaders(
         root_dir=args.data_dir,
-        train_transform=test_transform,  # Not used
+        train_transform=test_transform,
         test_transform=test_transform,
         batch_size=args.batch_size,
         use_bbox=True
@@ -310,7 +455,7 @@ def main():
     print(f"Test dataset size: {len(test_dataset)}")
     print(f"Number of classes: {len(class_names)}")
 
-    # Split test set for calibration
+    # Split test set for calibration and evaluation
     cal_size = int(len(test_dataset) * 0.5)
     eval_size = len(test_dataset) - cal_size
 
@@ -321,9 +466,10 @@ def main():
     )
 
     cal_loader = DataLoader(cal_dataset, batch_size=args.batch_size, shuffle=False)
+    eval_loader = DataLoader(eval_dataset, batch_size=args.batch_size, shuffle=False)
 
-    print(f"Calibration set size: {len(cal_dataset)}")
-    print(f"Evaluation set size: {len(eval_dataset)}")
+    print(f"Calibration set: {len(cal_dataset)}")
+    print(f"Evaluation set: {len(eval_dataset)}")
 
     # ========================================================================
     # Load Model
@@ -333,46 +479,112 @@ def main():
     print("Loading Model")
     print("=" * 70)
 
-    # Create model
     model = create_resnet50_model(num_classes=200, pretrained=False)
 
-    # Load checkpoint
     print(f"Loading checkpoint from {args.checkpoint}")
     checkpoint = torch.load(args.checkpoint, map_location=device)
     model.load_state_dict(checkpoint['model_state_dict'])
     model = model.to(device)
     model.eval()
 
-    print(f"Model loaded successfully!")
     if 'test_acc' in checkpoint:
         print(f"Checkpoint test accuracy: {checkpoint['test_acc']*100:.2f}%")
 
     # ========================================================================
-    # Setup Conformal Predictor
+    # Compute Classification Metrics
     # ========================================================================
 
     print("\n" + "=" * 70)
-    print("Setting up Conformal Predictor")
+    print("Computing Classification Metrics")
     print("=" * 70)
 
-    predictor = setup_conformal_predictor(
+    auroc, auprc = compute_classification_metrics(model, test_loader, device)
+
+    print(f"\nAUROC: {auroc:.4f}")
+    print(f"AUPRC: {auprc:.4f}")
+
+    # ========================================================================
+    # Run Conformal Prediction Experiments
+    # ========================================================================
+
+    conformal_results = run_conformal_experiments(
         model=model,
         cal_loader=cal_loader,
+        eval_loader=eval_loader,
         alpha=args.alpha,
         device=device
     )
 
-    if predictor:
-        print(f"Conformal predictor calibrated!")
-        print(f"Target coverage: {1-args.alpha:.1%}")
-
     # ========================================================================
-    # Test and Visualize Samples
+    # Save Numerical Results
     # ========================================================================
 
     print("\n" + "=" * 70)
-    print(f"Testing and Visualizing {args.n_samples} Samples")
+    print("Saving Results")
     print("=" * 70)
+
+    # Save metrics to CSV
+    metrics_data = {
+        'AUROC': [auroc],
+        'AUPRC': [auprc]
+    }
+
+    for result in conformal_results:
+        key = f"{result['predictor']}_{result['score']}"
+        metrics_data[f'{key}_Coverage'] = [result['coverage']]
+        metrics_data[f'{key}_AvgSetSize'] = [result['avg_set_size']]
+
+    metrics_df = pd.DataFrame(metrics_data)
+    metrics_csv_path = results_dir / 'metrics.csv'
+    metrics_df.to_csv(metrics_csv_path, index=False)
+    print(f"\nMetrics saved to {metrics_csv_path}")
+
+    # Save detailed conformal results
+    conformal_df = pd.DataFrame([{
+        'Predictor': r['predictor'],
+        'Score': r['score'],
+        'Coverage': r['coverage'],
+        'Avg_Set_Size': r['avg_set_size']
+    } for r in conformal_results])
+
+    conformal_csv_path = results_dir / 'conformal_results.csv'
+    conformal_df.to_csv(conformal_csv_path, index=False)
+    print(f"Conformal results saved to {conformal_csv_path}")
+
+    # Print summary table
+    print("\n" + "=" * 70)
+    print("CONFORMAL PREDICTION RESULTS")
+    print("=" * 70)
+    print(conformal_df.to_string(index=False))
+
+    # ========================================================================
+    # Create Visualizations
+    # ========================================================================
+
+    plot_conformal_results(conformal_results, results_dir, args.alpha)
+
+    # ========================================================================
+    # Visualize Sample Predictions with Explainability
+    # ========================================================================
+
+    print("\n" + "=" * 70)
+    print(f"Visualizing {args.n_samples} Sample Predictions")
+    print("=" * 70)
+
+    # Use best predictor for sample visualizations
+    best_result = min(conformal_results, key=lambda x: x['avg_set_size'])
+    print(f"\nUsing best predictor: {best_result['predictor']} + {best_result['score']}")
+
+    # Recreate best predictor
+    score_fn = LAC() if best_result['score'] == 'LAC' else APS()
+    if best_result['predictor'] == 'Split':
+        predictor = SplitPredictor(score_fn, model)
+    elif best_result['predictor'] == 'Class-Conditional':
+        predictor = ClassConditionalPredictor(score_fn, model)
+    else:
+        predictor = RC3PPredictor(score_fn, model)
+
+    predictor.calibrate(cal_loader, alpha=args.alpha)
 
     # Select random samples
     sample_indices = np.random.choice(
@@ -381,24 +593,21 @@ def main():
         replace=False
     )
 
+    visualized_count = 0
     for i, idx in enumerate(tqdm(sample_indices, desc="Processing samples")):
-        print(f"\nSample {i+1}/{len(sample_indices)} (index={idx})")
-
         image, true_label = eval_dataset[idx]
 
         # Get prediction set
-        prediction_set = get_prediction_set(predictor, image, device)
-
-        print(f"  True label: {class_names[true_label]}")
-        print(f"  Prediction set size: {len(prediction_set)}")
+        with torch.no_grad():
+            pred_mask = predictor.predict(image.unsqueeze(0).to(device))
+            prediction_set = torch.nonzero(pred_mask[0]).flatten().cpu().numpy()
 
         # Skip if only one class (no uncertainty)
         if len(prediction_set) <= 1:
-            print("  Skipping (no uncertainty, single prediction)")
             continue
 
         # Visualize with explanations
-        save_path = results_dir / f'sample_{i+1:03d}_idx{idx}.png'
+        save_path = results_dir / f'sample_{visualized_count+1:03d}.png'
         visualize_sample_with_explanations(
             image=image,
             true_label=true_label,
@@ -409,11 +618,18 @@ def main():
             save_path=save_path
         )
 
+        visualized_count += 1
+        if visualized_count >= args.n_samples:
+            break
+
     print("\n" + "=" * 70)
     print("Testing Complete!")
     print("=" * 70)
     print(f"\nResults saved to: {results_dir}")
-    print(f"Generated {len(list(results_dir.glob('*.png')))} visualizations")
+    print(f"  - metrics.csv: Classification and conformal metrics")
+    print(f"  - conformal_results.csv: Detailed conformal results")
+    print(f"  - conformal_analysis.png: Comparison charts")
+    print(f"  - {visualized_count} sample visualizations")
 
 
 if __name__ == '__main__':

@@ -538,6 +538,146 @@ def print_summary_insights(results: Dict):
     print("\n" + "=" * 80)
 
 
+def save_detailed_metrics(results: Dict, output_dir: str):
+    """Save detailed metrics to CSV files."""
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Save all metrics to CSV
+    metrics_df = pd.DataFrame({
+        'metric': ['spatial_agreement', 'shap_gini', 'gradcam_gini', 'inter_class_overlap', 'set_size'],
+        'mean': [
+            np.mean(results.get('spatial_agreement', [0])),
+            np.mean(results.get('shap_gini', [0])),
+            np.mean(results.get('gradcam_gini', [0])),
+            np.mean(results.get('inter_class_overlap', [0])),
+            np.mean(results.get('set_size', [0]))
+        ],
+        'std': [
+            np.std(results.get('spatial_agreement', [0])),
+            np.std(results.get('shap_gini', [0])),
+            np.std(results.get('gradcam_gini', [0])),
+            np.std(results.get('inter_class_overlap', [0])),
+            np.std(results.get('set_size', [0]))
+        ],
+        'min': [
+            np.min(results.get('spatial_agreement', [0])),
+            np.min(results.get('shap_gini', [0])),
+            np.min(results.get('gradcam_gini', [0])),
+            np.min(results.get('inter_class_overlap', [0])),
+            np.min(results.get('set_size', [0]))
+        ],
+        'max': [
+            np.max(results.get('spatial_agreement', [0])),
+            np.max(results.get('shap_gini', [0])),
+            np.max(results.get('gradcam_gini', [0])),
+            np.max(results.get('inter_class_overlap', [0])),
+            np.max(results.get('set_size', [0]))
+        ]
+    })
+
+    metrics_path = os.path.join(output_dir, 'explainability_metrics.csv')
+    metrics_df.to_csv(metrics_path, index=False)
+    print(f"✓ Detailed metrics saved to {metrics_path}")
+
+
+def plot_additional_visualizations(results: Dict, output_dir: str):
+    """Create additional visualization plots."""
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Plot 1: Distribution comparison (SHAP vs GradCAM Gini)
+    if 'shap_gini' in results and 'gradcam_gini' in results:
+        fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+
+        # Histogram
+        axes[0].hist(results['shap_gini'], bins=30, alpha=0.6, label='SHAP', color='blue', edgecolor='black')
+        axes[0].hist(results['gradcam_gini'], bins=30, alpha=0.6, label='GradCAM', color='red', edgecolor='black')
+        axes[0].set_xlabel('Gini Coefficient (Focus Score)', fontsize=12, fontweight='bold')
+        axes[0].set_ylabel('Frequency', fontsize=12, fontweight='bold')
+        axes[0].set_title('Focus Score Distribution', fontsize=14, fontweight='bold')
+        axes[0].legend()
+        axes[0].grid(axis='y', alpha=0.3)
+
+        # Box plot
+        data_to_plot = [results['shap_gini'], results['gradcam_gini']]
+        bp = axes[1].boxplot(data_to_plot, labels=['SHAP', 'GradCAM'], patch_artist=True)
+        bp['boxes'][0].set_facecolor('blue')
+        bp['boxes'][1].set_facecolor('red')
+        axes[1].set_ylabel('Gini Coefficient', fontsize=12, fontweight='bold')
+        axes[1].set_title('Focus Score Comparison', fontsize=14, fontweight='bold')
+        axes[1].grid(axis='y', alpha=0.3)
+
+        plt.tight_layout()
+        save_path = os.path.join(output_dir, 'focus_score_comparison.png')
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f"✓ Focus score comparison saved to {save_path}")
+
+    # Plot 2: Spatial agreement distribution
+    if 'spatial_agreement' in results and results['spatial_agreement']:
+        fig, ax = plt.subplots(figsize=(10, 6))
+
+        ax.hist(results['spatial_agreement'], bins=30, color='steelblue', edgecolor='black', alpha=0.7)
+        ax.axvline(x=np.mean(results['spatial_agreement']), color='red', linestyle='--',
+                   linewidth=2, label=f"Mean: {np.mean(results['spatial_agreement']):.3f}")
+        ax.set_xlabel('Spatial Agreement (IoU)', fontsize=12, fontweight='bold')
+        ax.set_ylabel('Frequency', fontsize=12, fontweight='bold')
+        ax.set_title('SHAP-GradCAM Spatial Agreement Distribution', fontsize=14, fontweight='bold')
+        ax.legend(fontsize=11)
+        ax.grid(axis='y', alpha=0.3)
+
+        plt.tight_layout()
+        save_path = os.path.join(output_dir, 'spatial_agreement_distribution.png')
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f"✓ Spatial agreement distribution saved to {save_path}")
+
+    # Plot 3: Comprehensive metrics summary
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    metrics = []
+    values = []
+    errors = []
+
+    if 'spatial_agreement' in results and results['spatial_agreement']:
+        metrics.append('Spatial\nAgreement')
+        values.append(np.mean(results['spatial_agreement']))
+        errors.append(np.std(results['spatial_agreement']))
+
+    if 'shap_gini' in results and results['shap_gini']:
+        metrics.append('SHAP\nFocus')
+        values.append(np.mean(results['shap_gini']))
+        errors.append(np.std(results['shap_gini']))
+
+    if 'gradcam_gini' in results and results['gradcam_gini']:
+        metrics.append('GradCAM\nFocus')
+        values.append(np.mean(results['gradcam_gini']))
+        errors.append(np.std(results['gradcam_gini']))
+
+    if 'inter_class_overlap' in results and results['inter_class_overlap']:
+        metrics.append('Inter-Class\nOverlap')
+        values.append(np.mean(results['inter_class_overlap']))
+        errors.append(np.std(results['inter_class_overlap']))
+
+    if metrics:
+        bars = ax.bar(metrics, values, yerr=errors, capsize=10, color='steelblue',
+                      edgecolor='black', alpha=0.7, error_kw={'linewidth': 2})
+        ax.set_ylabel('Score', fontsize=12, fontweight='bold')
+        ax.set_title('Explainability Metrics Summary', fontsize=14, fontweight='bold')
+        ax.grid(axis='y', alpha=0.3)
+
+        # Add value labels on bars
+        for bar, val in zip(bars, values):
+            height = bar.get_height()
+            ax.text(bar.get_x() + bar.get_width()/2., height,
+                    f'{val:.3f}', ha='center', va='bottom', fontweight='bold')
+
+        plt.tight_layout()
+        save_path = os.path.join(output_dir, 'metrics_summary.png')
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f"✓ Metrics summary saved to {save_path}")
+
+
 # ==============================================================================
 # Main Execution
 # ==============================================================================
@@ -585,7 +725,7 @@ def main():
     parser.add_argument(
         '--output-dir',
         type=str,
-        default='.',
+        default='./results',
         help='Directory for output files'
     )
     parser.add_argument(
@@ -680,23 +820,41 @@ def main():
     )
 
     # Generate visualizations and reports
-    print("\nGenerating visualizations...")
+    print("\n" + "=" * 80)
+    print("GENERATING VISUALIZATIONS AND REPORTS")
+    print("=" * 80)
+
+    print("\n1. Uncertainty analysis plot...")
     plot_uncertainty_analysis(
         results,
         save_path=os.path.join(args.output_dir, 'uncertainty_vs_overlap.png')
     )
 
-    print("\nGenerating LaTeX table...")
+    print("\n2. LaTeX table...")
     generate_latex_table(
         results,
         save_path=os.path.join(args.output_dir, 'results_table.tex')
     )
 
+    print("\n3. Detailed metrics CSV...")
+    save_detailed_metrics(results, args.output_dir)
+
+    print("\n4. Additional visualizations...")
+    plot_additional_visualizations(results, args.output_dir)
+
     # Print summary
     print_summary_insights(results)
 
-    print("\n✓ Evaluation complete!")
-    print(f"  Output files saved to: {args.output_dir}")
+    print("\n" + "=" * 80)
+    print("EVALUATION COMPLETE!")
+    print("=" * 80)
+    print(f"\nOutput files saved to: {args.output_dir}/")
+    print("  - uncertainty_vs_overlap.png")
+    print("  - results_table.tex")
+    print("  - explainability_metrics.csv")
+    print("  - focus_score_comparison.png")
+    print("  - spatial_agreement_distribution.png")
+    print("  - metrics_summary.png")
 
 
 if __name__ == '__main__':
