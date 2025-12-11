@@ -150,13 +150,15 @@ def main():
     parser.add_argument('--image-size', type=int, default=448,
                         help='Image size for training (default: 448)')
 
-    # Training parameters
-    parser.add_argument('--batch-size', type=int, default=32,
-                        help='Batch size (default: 32)')
+    # Training parameters (as specified in paper)
+    parser.add_argument('--batch-size', type=int, default=64,
+                        help='Batch size (default: 64)')
     parser.add_argument('--num-epochs', type=int, default=50,
                         help='Number of training epochs (default: 50)')
-    parser.add_argument('--lr', type=float, default=1e-4,
-                        help='Initial learning rate (default: 1e-4)')
+    parser.add_argument('--lr', type=float, default=5e-4,
+                        help='Initial learning rate (default: 5e-4)')
+    parser.add_argument('--lr-min', type=float, default=5e-5,
+                        help='Minimum learning rate for scheduler (default: 5e-5)')
     parser.add_argument('--weight-decay', type=float, default=1e-4,
                         help='Weight decay for AdamW (default: 1e-4)')
     parser.add_argument('--num-workers', type=int, default=4,
@@ -194,16 +196,10 @@ def main():
     MEAN = [0.485, 0.456, 0.406]
     STD = [0.229, 0.224, 0.225]
 
-    # Training transforms with modern stochastic augmentation
+    # Training transforms with TrivialAugmentWide (as specified in paper)
     train_transform = transforms.Compose([
         transforms.Resize((args.image_size, args.image_size)),
-        transforms.RandomHorizontalFlip(p=0.5),
-        transforms.ColorJitter(
-            brightness=0.2,
-            contrast=0.2,
-            saturation=0.2,
-            hue=0.1
-        ),
+        transforms.TrivialAugmentWide(),
         transforms.ToTensor(),
         transforms.Normalize(mean=MEAN, std=STD)
     ])
@@ -283,10 +279,11 @@ def main():
     )
 
     # Cosine annealing learning rate scheduler for gradual reduction
+    # Decays from args.lr (5e-4) to args.lr_min (5e-5) as specified in paper
     scheduler = optim.lr_scheduler.CosineAnnealingLR(
         optimizer,
         T_max=args.num_epochs,
-        eta_min=1e-6
+        eta_min=args.lr_min
     )
 
     print(f"\nOptimizer: AdamW")
@@ -294,7 +291,7 @@ def main():
     print(f"  - Weight decay: {args.weight_decay}")
     print(f"\nLR Scheduler: CosineAnnealingLR")
     print(f"  - T_max: {args.num_epochs}")
-    print(f"  - Min LR: 1e-6")
+    print(f"  - Min LR: {args.lr_min}")
 
     # ========================================================================
     # Training
