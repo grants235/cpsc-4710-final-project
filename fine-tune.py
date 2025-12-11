@@ -29,7 +29,7 @@ from helpers import (
 
 
 def train_model(model, train_loader, test_loader, optimizer, scheduler,
-                criterion, device, num_epochs, save_dir):
+                criterion, device, num_epochs, save_dir, accumulation_steps=1, scaler=None):
     """
     Complete training loop with learning rate scheduling
 
@@ -43,6 +43,8 @@ def train_model(model, train_loader, test_loader, optimizer, scheduler,
         device: Device to train on
         num_epochs: Number of training epochs
         save_dir: Directory to save checkpoints
+        accumulation_steps: Gradient accumulation steps
+        scaler: Mixed precision scaler (optional)
     """
     history = {
         'train_loss': [],
@@ -66,7 +68,8 @@ def train_model(model, train_loader, test_loader, optimizer, scheduler,
 
         # Train
         train_loss, train_acc = train_one_epoch(
-            model, train_loader, criterion, optimizer, device, epoch
+            model, train_loader, criterion, optimizer, device, epoch,
+            accumulation_steps=accumulation_steps, scaler=scaler
         )
 
         # Evaluate
@@ -151,8 +154,10 @@ def main():
                         help='Image size for training (default: 448)')
 
     # Training parameters (as specified in paper)
-    parser.add_argument('--batch-size', type=int, default=64,
-                        help='Batch size (default: 64)')
+    parser.add_argument('--batch-size', type=int, default=32,
+                        help='Batch size per GPU (default: 32, use with --accumulation-steps for effective 64)')
+    parser.add_argument('--accumulation-steps', type=int, default=2,
+                        help='Gradient accumulation steps (default: 2, effective batch=32*2=64)')
     parser.add_argument('--num-epochs', type=int, default=50,
                         help='Number of training epochs (default: 50)')
     parser.add_argument('--lr', type=float, default=5e-4,
@@ -161,8 +166,10 @@ def main():
                         help='Minimum learning rate for scheduler (default: 5e-5)')
     parser.add_argument('--weight-decay', type=float, default=1e-4,
                         help='Weight decay for AdamW (default: 1e-4)')
-    parser.add_argument('--num-workers', type=int, default=4,
-                        help='Number of data loading workers (default: 4)')
+    parser.add_argument('--num-workers', type=int, default=2,
+                        help='Number of data loading workers (default: 2)')
+    parser.add_argument('--mixed-precision', action='store_true',
+                        help='Use mixed precision training (fp16) to save memory')
 
     # Model parameters
     parser.add_argument('--pretrained', action='store_true', default=True,
@@ -292,6 +299,17 @@ def main():
     print(f"\nLR Scheduler: CosineAnnealingLR")
     print(f"  - T_max: {args.num_epochs}")
     print(f"  - Min LR: {args.lr_min}")
+    print(f"\nTraining Configuration:")
+    print(f"  - Batch size: {args.batch_size}")
+    print(f"  - Gradient accumulation steps: {args.accumulation_steps}")
+    print(f"  - Effective batch size: {args.batch_size * args.accumulation_steps}")
+    print(f"  - Mixed precision: {args.mixed_precision}")
+
+    # Setup mixed precision training if requested
+    scaler = None
+    if args.mixed_precision and device.type == 'cuda':
+        scaler = torch.cuda.amp.GradScaler()
+        print("  - Using automatic mixed precision (AMP)")
 
     # ========================================================================
     # Training
@@ -306,7 +324,9 @@ def main():
         criterion=criterion,
         device=device,
         num_epochs=args.num_epochs,
-        save_dir=save_dir
+        save_dir=save_dir,
+        accumulation_steps=args.accumulation_steps,
+        scaler=scaler
     )
 
     print("\n" + "=" * 70)

@@ -2065,10 +2065,12 @@ def train_one_epoch(
     criterion,
     optimizer,
     device: str,
-    epoch: int
+    epoch: int,
+    accumulation_steps: int = 1,
+    scaler = None
 ) -> Tuple[float, float]:
     """
-    Train for one epoch.
+    Train for one epoch with gradient accumulation and mixed precision support.
 
     Args:
         model: PyTorch model
@@ -2077,6 +2079,8 @@ def train_one_epoch(
         optimizer: Optimizer
         device: Device to train on
         epoch: Current epoch number
+        accumulation_steps: Number of steps to accumulate gradients
+        scaler: GradScaler for mixed precision (optional)
 
     Returns:
         tuple: (epoch_loss, epoch_accuracy)
@@ -2087,29 +2091,45 @@ def train_one_epoch(
     total = 0
 
     pbar = tqdm(train_loader, desc=f"Epoch {epoch} - Training")
-    for images, labels in pbar:
+    for batch_idx, (images, labels) in enumerate(pbar):
         images, labels = images.to(device), labels.to(device)
 
-        # Zero gradients
-        optimizer.zero_grad()
-
-        # Forward pass
-        outputs = model(images)
-        loss = criterion(outputs, labels)
+        # Forward pass with mixed precision if scaler is provided
+        if scaler is not None:
+            with torch.cuda.amp.autocast():
+                outputs = model(images)
+                loss = criterion(outputs, labels)
+                loss = loss / accumulation_steps  # Normalize loss
+        else:
+            outputs = model(images)
+            loss = criterion(outputs, labels)
+            loss = loss / accumulation_steps  # Normalize loss
 
         # Backward pass
-        loss.backward()
-        optimizer.step()
+        if scaler is not None:
+            scaler.scale(loss).backward()
+        else:
+            loss.backward()
 
-        # Statistics
-        running_loss += loss.item() * images.size(0)
+        # Update weights after accumulation_steps
+        if (batch_idx + 1) % accumulation_steps == 0 or (batch_idx + 1) == len(train_loader):
+            if scaler is not None:
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad()
+            else:
+                optimizer.step()
+                optimizer.zero_grad()
+
+        # Statistics (use unscaled loss)
+        running_loss += (loss.item() * accumulation_steps) * images.size(0)
         _, predicted = torch.max(outputs, 1)
         total += labels.size(0)
         correct += (predicted == labels).sum().item()
 
         # Update progress bar
         pbar.set_postfix({
-            'loss': f'{loss.item():.4f}',
+            'loss': f'{loss.item() * accumulation_steps:.4f}',
             'acc': f'{100. * correct / total:.2f}%'
         })
 

@@ -22,27 +22,43 @@ This will:
 
 Train ResNet-50 on CUB-200-2011 (paper specifications):
 
+**Memory-efficient (recommended for limited GPU/RAM):**
+```bash
+python fine-tune.py \
+    --data-dir ./CUB_200_2011 \
+    --num-epochs 50 \
+    --batch-size 32 \
+    --accumulation-steps 2 \
+    --lr 5e-4 \
+    --lr-min 5e-5 \
+    --use-bbox \
+    --mixed-precision
+```
+
+**High-memory systems (if you have ≥16GB GPU RAM):**
 ```bash
 python fine-tune.py \
     --data-dir ./CUB_200_2011 \
     --num-epochs 50 \
     --batch-size 64 \
+    --accumulation-steps 1 \
     --lr 5e-4 \
     --lr-min 5e-5 \
     --use-bbox
 ```
 
 **Key parameters (paper specifications):**
-- `--num-epochs`: Number of training epochs (default: 50)
-- `--batch-size`: Batch size for training (default: 64)
+- `--batch-size`: Batch size per GPU (default: 32)
+- `--accumulation-steps`: Gradient accumulation (default: 2, effective batch=64)
+- `--mixed-precision`: Use fp16 to save memory (recommended)
 - `--lr`: Initial learning rate (default: 5e-4)
 - `--lr-min`: Minimum LR for cosine annealing (default: 5e-5)
 - `--weight-decay`: AdamW weight decay (default: 1e-4)
-- `--image-size`: Input image size (default: 448)
 - `--use-bbox`: Crop images to bounding boxes (recommended)
-- `--freeze-backbone`: Only train classifier head
 
 **Data augmentation:** Uses `TrivialAugmentWide()` as specified in paper
+
+**Note:** Effective batch size = `batch-size × accumulation-steps` (paper uses 64)
 
 **Outputs:**
 - `checkpoints/best_model.pth`: Best model checkpoint
@@ -244,6 +260,49 @@ CUB-200-2011 Dataset:
   Year = {2010}
 }
 ```
+
+## Troubleshooting
+
+### Out of Memory (OOM) Errors / "Killed" During Training
+
+If training gets killed or you see OOM errors:
+
+**1. Use memory-efficient settings (recommended):**
+```bash
+python fine-tune.py \
+    --batch-size 16 \
+    --accumulation-steps 4 \
+    --mixed-precision \
+    --num-workers 2 \
+    --use-bbox
+```
+
+**2. Further reduce batch size if needed:**
+- Try `--batch-size 8 --accumulation-steps 8`
+- Or even `--batch-size 4 --accumulation-steps 16`
+
+**3. Monitor GPU/RAM usage:**
+```bash
+# For GPU
+nvidia-smi -l 1
+
+# For RAM
+htop
+```
+
+**4. Reduce image size (last resort):**
+```bash
+python fine-tune.py --image-size 224 --batch-size 32
+```
+
+### Gradient Accumulation Explanation
+
+Gradient accumulation lets you use smaller batch sizes while maintaining the same effective batch size:
+- `batch-size=32, accumulation-steps=2` → effective batch = 64
+- `batch-size=16, accumulation-steps=4` → effective batch = 64
+- `batch-size=8, accumulation-steps=8` → effective batch = 64
+
+All achieve the paper's batch size of 64 but use less memory!
 
 ## License
 
