@@ -264,11 +264,12 @@ def create_explanation_wrappers(model: nn.Module, device: str = 'cuda'):
         """Generate GradCAM explanation."""
         idx_tensor = torch.tensor([class_idx], device=device) if isinstance(class_idx, int) else class_idx
 
+        # For regular ResNet50, the target layer is model.layer4[-1] (not model.model.layer4[-1])
         results = explain_predictions_with_gradcam(
             model=model,
             input_tensor=image,
             class_indices=idx_tensor,
-            target_layer=model.model.layer4[-1],
+            target_layer=model.layer4[-1],  # Updated for regular PyTorch model
             device=device
         )
 
@@ -793,9 +794,17 @@ def main():
 
     # Load model
     print(f"Loading model from {args.checkpoint}...")
-    model = LitResNet.load_from_checkpoint(checkpoint_path=args.checkpoint)
+
+    # Use the same model loading as test.py and analysis.py
+    from helpers import create_resnet50_model
+
+    model = create_resnet50_model(num_classes=200, pretrained=False)
+    checkpoint = torch.load(args.checkpoint, map_location=device)
+    model.load_state_dict(checkpoint['model_state_dict'])
     model = model.to(device)
     model.eval()
+
+    print("Model loaded successfully!")
 
     # Setup conformal predictor
     print("Setting up conformal predictor...")
